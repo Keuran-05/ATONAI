@@ -1,6 +1,8 @@
 import asyncio
-from Helius import getTokenLargestAccounts, getTokenSupply, getAsset, getTokenAccountsByOwner, getSignaturesForAddress, parseTransactions
+from Helius import getTokenLargestAccounts, getTokenSupply, getAsset, getTokenAccountsByOwner, getSignaturesForAddress, \
+    parseTransactions
 from Logs import log_info, log_warning
+
 
 # Fetch token symbol with batch support
 async def get_token_symbol(token_address):
@@ -25,22 +27,34 @@ async def format_number(num):
 
 async def run_scan(token_address):
     log_info(f"Starting scan for token: {token_address}")
-    top_wallets = await getTokenLargestAccounts(token_address)
-    supply = await getTokenSupply(token_address)
+
+    # Fetch top wallets and supply concurrently
+    top_wallets, supply = await asyncio.gather(
+        getTokenLargestAccounts(token_address),
+        getTokenSupply(token_address)
+    )
+
     output = []
 
     if not top_wallets:
         log_warning("No wallets found or an error occurred.")
         return None
 
-    userAccounts = []
+    # Optimize by creating tasks for signatures and transactions
+    signature_tasks = [
+        asyncio.create_task(getSignaturesForAddress(tokenAccount, 10))
+        for tokenAccount, _ in top_wallets
+    ]
+    signature_results = await asyncio.gather(*signature_tasks)
 
-    for tokenAccount, _ in top_wallets:
-        signature_data_tokenAccount = await getSignaturesForAddress(tokenAccount, 10)
-        userAccount = await parseTransactions(signature_data_tokenAccount, tokenAccount, None, True, None)
-        userAccounts.append(userAccount)
+    # Parse transactions concurrently
+    transaction_tasks = [
+        asyncio.create_task(parseTransactions(sig_data, tokenAccount, None, True, None))
+        for (tokenAccount, _), sig_data in zip(top_wallets, signature_results)
+    ]
+    userAccounts = await asyncio.gather(*transaction_tasks)
 
-    # Fetch wallet assets in parallel
+    # Fetch wallet assets in parallel with more efficient gathering
     wallet_tasks = [getTokenAccountsByOwner(address, None) for address in userAccounts]
     wallet_results = await asyncio.gather(*wallet_tasks, return_exceptions=True)
 
@@ -48,8 +62,10 @@ async def run_scan(token_address):
         percentage = (balance / supply) * 100 if supply else 0
         format_num = await format_number(balance)
         icon = "🐋" if percentage > 5 else "🐬" if percentage > 3 else "🐟"
-        if userAccounts[idx-1]:
-            output.append(f"#{idx} {userAccounts[idx-1][:3]}...{userAccounts[idx-1][-3:]} | Balance: {format_num} | ({percentage:.2f}%) {icon}")
+
+        if userAccounts[idx - 1]:
+            output.append(
+                f"#{idx} {userAccounts[idx - 1][:3]}...{userAccounts[idx - 1][-3:]} | Balance: {format_num} | ({percentage:.2f}%) {icon}")
 
             # Handle cases where no assets are found
             wallet_assets = wallet_results[idx - 1]
@@ -70,8 +86,5 @@ async def run_scan(token_address):
                 output.append(f"├ {symbol}: {asset_formatted_balance}")
             output.append("")
 
-
     log_info("Scan completed successfully.")
     return "\n".join(output)
-
-
